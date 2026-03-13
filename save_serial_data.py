@@ -17,8 +17,12 @@ def read_from_port(ser):
             if ser.in_waiting > 0:
                 line = ser.readline().decode('utf-8', errors='ignore').strip()
                 
-                # Always print the line to the terminal so menus are visible!
-                print(line)
+                # Check if it's a CSV data line (it has many commas)
+                is_csv_data = line.count(',') >= 5 and "Timestamp_ms" not in line
+                
+                if not is_csv_data:
+                    # Print menus, statuses, and headers so the user can read them
+                    print(line)
 
                 if "--- Starting New Run" in line:
                     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -26,20 +30,31 @@ def read_from_port(ser):
                     if current_file:
                         current_file.close()
                     current_file = open(filename, 'w')
+                    # Write the CSV header
+                    current_file.write("Timestamp_ms,Position,Voltage_V,Temp_C,Speed,Load_A,Moving,AccumulatedCounts,Weight1_kg,Weight2_kg,Command\n")
                     is_recording = True
                     print(f"\n[>>>] AUTO-SAVE STARTED: Created {filename} on laptop.")
                 
-                elif "[ TEST COMPLETE" in line:
+                elif "[ TARGET REACHED ]" in line or "[ TEST COMPLETE" in line:
                     if current_file:
                         current_file.close()
                         current_file = None
                     is_recording = False
                     print(f"[|||] AUTO-SAVE STOPPED. File saved.\n")
+                    
+                elif "Exiting Wind Tunnel Mode" in line:
+                    if current_file:
+                        current_file.close()
+                        current_file = None
+                    is_recording = False
+                    print(f"[|||] EXITED MODE. File saved.\n")
 
-                elif is_recording:
+                # If it's CSV data and we are recording, save it to the file silently
+                if is_recording and is_csv_data:
                     if current_file:
                         current_file.write(line + '\n')
                         current_file.flush()
+                        
     except Exception as e:
         print(f"Read thread error: {e}")
 

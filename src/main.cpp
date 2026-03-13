@@ -28,8 +28,8 @@ const int LOADCELL2_DOUT_PIN = 4;
 const int LOADCELL2_SCK_PIN = 5;
 
 // * DEFAULT CALIBRATION FACTORS *
-float CAL_FACTOR_1 = 1000.0; 
-float CAL_FACTOR_2 = 1000.0;
+float CAL_FACTOR_1 = 189.582; 
+float CAL_FACTOR_2 = -195.508;
 
 STSServoDriver servo;
 HX711 scale1;
@@ -45,6 +45,13 @@ int previousPosForTracking = 0;
 bool isMotorRunningTest = false;
 bool isRunningWheelMode = false;
 unsigned long currentTestStartTime = 0;
+int softwareZeroOffset = 0;
+String activeCommand = "NONE";
+
+// Variables for exact Wheel Mode stopping
+int initialPosForWheelMode = 0;
+int directionForWheelMode = 1;
+bool isBrakingWheelMode = false;
 
 // Setup Dispatcher
 xcore::Dispatcher<5> dispatcher; 
@@ -195,22 +202,20 @@ void runServoCalibration() {
 // ==========================================
 // MODE 2: LOAD CELL CALIBRATION
 // ==========================================
-int loadCellCalibrationStep = 0; // 0: Setup, 1: Wait Scale 1, 2: Wait Scale 2
+int loadCellCalibrationStep = 0; 
 float tempCalFactor1 = 1000.0;
 
 void runLoadCellCalibration() {
     if (loadCellCalibrationStep == 0) {
-        Serial.println("\n\n--- LOAD CELL CALIBRATION MODE ---");
-        Serial.println("Taring scales... Please wait.");
+        Serial.println("\n\n--- LOAD CELL CALIBRATION WIZARD ---");
         scale1.set_scale();
         scale2.set_scale();
-        scale1.tare();
-        scale2.tare();
         
-        Serial.println("\n[ STEP 1: Calibrate Load Cell 1 ]");
-        Serial.println("1. Make sure Load Cell 1 is EMPTY.");
-        Serial.println("2. Place a KNOWN weight (e.g., 1kg) on Load Cell 1 ONLY.");
-        Serial.println("3. Type the known weight (e.g. '1.0') and press Enter.");
+        Serial.println("\n[ STEP 1: LOAD CELL 1 (Cart Base) TARE ]");
+        Serial.println("-> This load cell sits under the cart.");
+        Serial.println("-> Ensure the cart (1304g static deadweight) is resting completely on Load Cell 1.");
+        Serial.println("-> Do NOT pull the string yet.");
+        Serial.println("-> Type 't' and press Enter to tare (zero) Load Cell 1 with the cart's weight.");
         Serial.println("   (Or type 'q' to quit to menu).");
         loadCellCalibrationStep = 1;
     }
@@ -226,38 +231,76 @@ void runLoadCellCalibration() {
             return;
         }
 
-        if (input.length() > 0) {
+        if (loadCellCalibrationStep == 1 && (input.equalsIgnoreCase("t"))) {
+            Serial.println("Taring Load Cell 1... Please wait.");
+            scale1.tare(20);
+            Serial.println("Load Cell 1 Tared successfully! (Cart deadweight is now 0).");
+            
+            Serial.println("\n[ STEP 2: LOAD CELL 1 CALIBRATION ]");
+            Serial.println("-> Place a KNOWN weight (e.g., 500) ON TOP of the resting cart.");
+            Serial.println("-> Note: Because we want an UPWARD pull to read as positive, the code will automatically invert this downward weight calibration.");
+            Serial.println("-> Type the weight you placed (e.g., '500') and press Enter.");
+            loadCellCalibrationStep = 2;
+        }
+        else if (loadCellCalibrationStep == 2 && input.length() > 0) {
             float knownWeight = input.toFloat();
             if (knownWeight > 0) {
+                Serial.print("Calculating Load Cell 1 for weight: "); Serial.println(knownWeight);
+                long reading1 = scale1.get_value(20);
                 
-                if (loadCellCalibrationStep == 1) {
-                    Serial.print("Calculating Load Cell 1 for weight: "); Serial.println(knownWeight);
-                    long reading1 = scale1.get_value(10);
-                    tempCalFactor1 = reading1 / knownWeight;
-                    Serial.print("-> Scale 1 Calibration Factor: "); Serial.println(tempCalFactor1);
-                    
-                    Serial.println("\n[ STEP 2: Calibrate Load Cell 2 ]");
-                    Serial.println("1. Remove the weight from Load Cell 1.");
-                    Serial.println("2. Place the KNOWN weight on Load Cell 2 ONLY.");
-                    Serial.println("3. Type the known weight (e.g. '1.0') and press Enter.");
-                    loadCellCalibrationStep = 2;
-                } 
-                else if (loadCellCalibrationStep == 2) {
-                    Serial.print("Calculating Load Cell 2 for weight: "); Serial.println(knownWeight);
-                    long reading2 = scale2.get_value(10);
-                    float calFactor2 = reading2 / knownWeight;
-                    Serial.print("-> Scale 2 Calibration Factor: "); Serial.println(calFactor2);
-                    
-                    Serial.println("\nUpdating system calibration factors in memory for Mode 3...");
-                    CAL_FACTOR_1 = tempCalFactor1;
-                    CAL_FACTOR_2 = calFactor2;
-                    
-                    Serial.println("Returning to Menu in 4 seconds...");
-                    delay(4000);
-                    loadCellCalibrationStep = 0;
-                    currentState = MODE_MENU;
-                    printMenu();
-                }
+                // INVERT the calibration factor so upward pulls are positive
+                tempCalFactor1 = -(reading1 / knownWeight);
+                
+                Serial.println("\n------------------------------------------------");
+                Serial.println("  [ SUCCESS: ACTIVE MEMORY UPDATED ]");
+                Serial.print("  >>> CAL_FACTOR_1 = "); Serial.println(tempCalFactor1, 2);
+                Serial.println("------------------------------------------------");
+                
+                Serial.println("\n[ STEP 3: LOAD CELL 2 (String Tension) TARE ]");
+                Serial.println("-> This load cell measures direct string pull.");
+                Serial.println("-> Ensure there is absolutely NO tension on the string (resting naturally).");
+                Serial.println("-> Type 't' and press Enter to tare (zero) Load Cell 2.");
+                loadCellCalibrationStep = 3;
+            }
+        }
+        else if (loadCellCalibrationStep == 3 && (input.equalsIgnoreCase("t"))) {
+            Serial.println("Taring Load Cell 2... Please wait.");
+            scale2.tare(20);
+            Serial.println("Load Cell 2 Tared successfully!");
+            
+            Serial.println("\n[ STEP 4: LOAD CELL 2 CALIBRATION ]");
+            Serial.println("-> Apply a KNOWN pulling force (e.g., hang a 500g weight from the string).");
+            Serial.println("-> Type the weight (e.g., '500') and press Enter.");
+            loadCellCalibrationStep = 4;
+        }
+        else if (loadCellCalibrationStep == 4 && input.length() > 0) {
+            float knownWeight = input.toFloat();
+            if (knownWeight > 0) {
+                Serial.print("Calculating Load Cell 2 for weight: "); Serial.println(knownWeight);
+                long reading2 = scale2.get_value(20);
+                
+                // Standard positive calibration factor
+                float calFactor2 = reading2 / knownWeight;
+                
+                CAL_FACTOR_1 = tempCalFactor1;
+                CAL_FACTOR_2 = calFactor2;
+
+                Serial.println("\n=======================================================");
+                Serial.println("            CALIBRATION WIZARD COMPLETE                ");
+                Serial.println("=======================================================");
+                Serial.println(" The system's active memory is now temporarily updated!  ");
+                Serial.print("   CAL_FACTOR_1 = "); Serial.println(CAL_FACTOR_1, 2);
+                Serial.print("   CAL_FACTOR_2 = "); Serial.println(CAL_FACTOR_2, 2);
+                Serial.println("-------------------------------------------------------");
+                Serial.println(" ⚠️ IMPORTANT: TO MAKE THESE PERMANENT, COPY THESE");
+                Serial.println(" EXACT NUMBERS INTO src/main.cpp ON LINES 31 AND 32!");
+                Serial.println("=======================================================\n");
+                
+                Serial.println("Returning to Menu in 8 seconds...");
+                delay(8000);
+                loadCellCalibrationStep = 0;
+                currentState = MODE_MENU;
+                printMenu();
             }
         }
     }
@@ -281,38 +324,68 @@ void motorTrackingTask() {
             // WHEEL MODE: Manual distance tracking
             int currentPos = servo.getCurrentPosition(SERVO_ID);
             
-            // Handle wheel mode wrap-around (0 to 4095)
-            if (currentPos < previousPosForTracking - 2000) { 
-                totalAccumulatedCounts += (4096 - previousPosForTracking) + currentPos;
-            } else {
-                totalAccumulatedCounts += (currentPos - previousPosForTracking);
-            }
-            previousPosForTracking = currentPos;
-
-            // Early stop compensation for high-speed momentum drift
-            // If the target is very small (like R0.25 = 1024 counts), a fixed 1200 drift 
-            // compensation will instantly trigger a stop. We must scale it.
-            int driftCompensation = 1200; 
-            if (targetCountsToMove <= 2000) {
-                driftCompensation = targetCountsToMove * 0.25; // Small drift for short distances
+            // Calculate absolute distance traveled since last tick, handling wrap-around in BOTH directions.
+            int diff = currentPos - previousPosForTracking;
+            
+            if (diff > 2048) {
+                // Wrapped backwards
+                diff = diff - 4096;
+            } else if (diff < -2048) {
+                // Wrapped forwards
+                diff = diff + 4096;
             }
             
-            if (totalAccumulatedCounts >= (targetCountsToMove - driftCompensation)) {
-                servo.setTargetVelocity(SERVO_ID, 0); // Stop motor early to coast
-                isMotorRunningTest = false;
-                Serial.println("\n[ TEST COMPLETE - WHEEL TARGET REACHED ]");
-                Serial.println("Motor stopped. Enter a new command (or 'q' to quit).");
-                // Return to servo mode to hold position
+            // Accumulate absolute physical distance traveled
+            totalAccumulatedCounts += abs(diff);
+            previousPosForTracking = currentPos;
+
+            // Early stop compensation for coasting
+            int driftCompensation = 1200; 
+            if (targetCountsToMove <= 2000) {
+                driftCompensation = targetCountsToMove * 0.25; 
+            }
+            
+            if (!isBrakingWheelMode && totalAccumulatedCounts >= (targetCountsToMove - driftCompensation)) {
+                isBrakingWheelMode = true;
+                
+                // Stop Wheel Mode velocity so it starts coasting
+                servo.setTargetVelocity(SERVO_ID, 0); 
+                
+                // Switch back to Servo Mode instantly to catch it and pull it to the exact spot
                 servo.writeRegister(SERVO_ID, STSRegisters::OPERATION_MODE, 0);
+                delay(10);
+                
+                // Calculate the exact mathematical final angle
+                long exactFinalAngle = 0;
+                if (directionForWheelMode == 1) {
+                    exactFinalAngle = (initialPosForWheelMode + targetCountsToMove) % 4096;
+                } else {
+                    exactFinalAngle = (initialPosForWheelMode - targetCountsToMove) % 4096;
+                    if (exactFinalAngle < 0) exactFinalAngle += 4096;
+                }
+                
+                // Command hardware to go to the EXACT starting angle to finish the movement and pull back any overshoot
+                servo.setTargetPosition(SERVO_ID, exactFinalAngle, 3350);
+            }
+            
+            // Wait for Servo Mode to finish the final precision braking
+            if (isBrakingWheelMode) {
+                byte moving = servo.readRegister(SERVO_ID, STSRegisters::MOVING_STATUS);
+                if (moving == 0) {
+                    isMotorRunningTest = false; // Unlocks command listener for next run
+                    activeCommand = "NONE";
+                    // We don't print "enter new command" here to avoid interrupting the continuous data stream too much
+                    Serial.println("\n[ TARGET REACHED ]"); 
+                }
             }
         } else {
             // SERVO MODE: Hardware tracking
             byte moving = servo.readRegister(SERVO_ID, STSRegisters::MOVING_STATUS);
             
             if (moving == 0 && (millis() - currentTestStartTime) > 50) {
-                isMotorRunningTest = false;
-                Serial.println("\n[ TEST COMPLETE - SERVO TARGET REACHED ]");
-                Serial.println("Motor stopped. Enter a new command (or 'q' to quit).");
+                isMotorRunningTest = false; // Unlocks command listener
+                activeCommand = "NONE";
+                Serial.println("\n[ TARGET REACHED ]");
             }
         }
     }
@@ -320,8 +393,9 @@ void motorTrackingTask() {
 
 // Task 3: Data Aggregation and Output
 void printAndLogDataTask() {
-    // Only log if the motor is actively running a test to avoid massive idle logs
-    if (!isMotorRunningTest) return; 
+    // We log data continuously as long as Wind Tunnel Mode is active, 
+    // even if the motor is currently stopped.
+    if (!windTunnelSetupDone) return; 
 
     // Calculate elapsed time since this specific run started
     unsigned long elapsed_ms = millis() - currentTestStartTime;
@@ -343,7 +417,8 @@ void printAndLogDataTask() {
                      String(moving) + "," +
                      String(totalAccumulatedCounts) + "," +
                      String(weight1, 3) + "," +
-                     String(weight2, 3);
+                     String(weight2, 3) + "," +
+                     activeCommand;
                      
     Serial.println(csvLine);
     if (logFile) {
@@ -355,56 +430,124 @@ void printAndLogDataTask() {
 
 // Task 4: Command Listener
 void handleSerialCommandsTask() {
-    if (Serial.available()) {
-        String input = Serial.readStringUntil('\n');
+    static String commandBuf = "";
+    static unsigned long lastCharTime = 0;
+    bool commandReady = false;
+
+    while (Serial.available()) {
+        char c = Serial.read();
+        lastCharTime = millis();
+        if (c == '\n' || c == '\r') {
+            commandReady = true;
+            break; // Stop reading to process the command
+        } else {
+            commandBuf += c;
+        }
+    }
+
+    // Process if we hit a newline/return, OR if 500ms has passed since the last character (timeout fallback)
+    if (commandBuf.length() > 0 && (commandReady || (millis() - lastCharTime > 500))) {
+        String input = commandBuf;
         input.trim();
+        commandBuf = ""; // Reset buffer for next command
         
+        if (input.length() == 0) return;
+
         if (input.equalsIgnoreCase("q")) {
             Serial.println("\nExiting Wind Tunnel Mode. Returning to Menu...");
             servo.setTargetVelocity(SERVO_ID, 0);
             servo.writeRegister(SERVO_ID, STSRegisters::OPERATION_MODE, 0); // Back to Servo Mode
             windTunnelSetupDone = false;
             isMotorRunningTest = false;
+            activeCommand = "NONE";
             if(logFile) logFile.close();
             currentState = MODE_MENU;
             printMenu();
             return;
         }
 
-        // Only accept new commands if a test isn't currently running
-        if (input.length() > 0 && !isMotorRunningTest) {
-            char cmdType = input.charAt(0);
-            float value = input.substring(1).toFloat();
-            long newTargetCounts = 0;
-            
-            // Parse formats: 'R2' for 2 Revs, 'D90' for 90 Deg
-            if (cmdType == 'R' || cmdType == 'r') {
-                targetCountsToMove = (long)(value * 4096.0);
-            } else if (cmdType == 'D' || cmdType == 'd') {
-                targetCountsToMove = (long)((value / 360.0) * 4096.0);
-            }
-            
-            if (targetCountsToMove > 0) {
-                // We use Wheel Mode for BOTH R and D commands because the STS3215 
-                // positional mode physically limits at 4096 counts (1 revolution)
-                // and cannot reliably do multi-turn absolute positioning without complex 
-                // offset math. Wheel mode with software tracking handles any distance perfectly.
-                isRunningWheelMode = true; 
+        // Feature: Set Current Angle to 0
+        if (input.equalsIgnoreCase("set") || input.equalsIgnoreCase("set 0")) {
+            if (!isMotorRunningTest) {
+                activeCommand = "SET_0";
+                Serial.println("\n[ COMMAND: RETURN TO 0 ANGLE ]");
                 
-                Serial.print("\n--- Starting New Run (WHEEL MODE): Target = ");
-                Serial.print(targetCountsToMove);
-                Serial.println(" counts ---");
-                
-                totalAccumulatedCounts = 0;
-                previousPosForTracking = servo.getCurrentPosition(SERVO_ID);
-                
-                servo.writeRegister(SERVO_ID, STSRegisters::OPERATION_MODE, 1);
+                // Ensure we are in Servo Mode
+                servo.writeRegister(SERVO_ID, STSRegisters::OPERATION_MODE, 0);
                 delay(10);
                 
-                Serial.println("Timestamp_ms,Position,Voltage_V,Temp_C,Speed,Load_A,Moving,TargetCounts,Weight1_g,Weight2_g");
+                // Physically move back to Position 0 at max speed
+                servo.setTargetPosition(SERVO_ID, 0, 3350);
+                
+                Serial.println("Returning to physical 0 position...");
+                return;
+            } else {
+                Serial.println("Cannot return to 0 while motor is running.");
+                return;
+            }
+        }
+
+        // Only accept new commands if a test isn't currently running
+        if (!isMotorRunningTest) {
+            char cmdType = input.charAt(0);
+            float value = input.substring(1).toFloat();
+            
+            // Parse formats: 'R2' for 2 Revs, 'D90' for 90 Deg, 'R-1' for -1 Rev
+            if (cmdType == 'R' || cmdType == 'r') {
+                activeCommand = input;
+                targetCountsToMove = (long)(value * 4096.0);
+                if (targetCountsToMove != 0) {
+                    int spinSpeed = 3350;
+                    if (targetCountsToMove < 0) {
+                        spinSpeed = -3350;
+                        targetCountsToMove = abs(targetCountsToMove);
+                    }
+
+                    isRunningWheelMode = true; 
+                    isBrakingWheelMode = false;
+                    directionForWheelMode = (spinSpeed > 0) ? 1 : -1;
+                    
+                    Serial.print("\n--- Starting New Run (WHEEL MODE): Target = ");
+                    Serial.print(targetCountsToMove);
+                    Serial.print(" counts | Direction = ");
+                    Serial.print((spinSpeed > 0) ? "Forward" : "Backward");
+                    Serial.println(" ---");
+                    
+                    totalAccumulatedCounts = 0;
+                    initialPosForWheelMode = servo.getCurrentPosition(SERVO_ID);
+                    previousPosForTracking = initialPosForWheelMode;
+                    
+                    servo.writeRegister(SERVO_ID, STSRegisters::OPERATION_MODE, 1);
+                    delay(10);
+                    
+                    Serial.println("Timestamp_ms,Position,Voltage_V,Temp_C,Speed,Load_A,Moving,TargetCounts,Weight1_g,Weight2_g,Command");
+                    isMotorRunningTest = true;
+                    currentTestStartTime = millis(); 
+                    servo.setTargetVelocity(SERVO_ID, spinSpeed); 
+                }
+            } else if (cmdType == 'D' || cmdType == 'd') {
+                activeCommand = input;
+                // D mode uses absolute Servo Mode (Operation Mode 0)
+                // Target is absolute angle, constrained to 0-4095
+                long absoluteTarget = (long)((value / 360.0) * 4096.0);
+                
+                // Wrap to valid physical range
+                while (absoluteTarget < 0) absoluteTarget += 4096;
+                while (absoluteTarget > 4095) absoluteTarget -= 4096;
+                
+                isRunningWheelMode = false;
+                
+                Serial.print("\n--- Starting New Run (SERVO MODE): Absolute Target = ");
+                Serial.print(absoluteTarget);
+                Serial.println(" counts ---");
+                
+                servo.writeRegister(SERVO_ID, STSRegisters::OPERATION_MODE, 0);
+                delay(10);
+                
+                Serial.println("Timestamp_ms,Position,Voltage_V,Temp_C,Speed,Load_A,Moving,TargetCounts,Weight1_g,Weight2_g,Command");
                 isMotorRunningTest = true;
                 currentTestStartTime = millis(); 
-                servo.setTargetVelocity(SERVO_ID, 3350); 
+                servo.setTargetPosition(SERVO_ID, absoluteTarget, 3350); 
             }
         }
     }
@@ -423,7 +566,7 @@ void runWindTunnelTest() {
             String filename = "TEST_" + String(millis()) + ".CSV";
             logFile = SD.open(filename.c_str(), FILE_WRITE);
             if (logFile) {
-                logFile.println("Timestamp_ms,Position,Voltage_V,Temp_C,Speed,Load_A,Moving,AccumulatedCounts,Weight1_kg,Weight2_kg");
+                logFile.println("Timestamp_ms,Position,Voltage_V,Temp_C,Speed,Load_A,Moving,AccumulatedCounts,Weight1_kg,Weight2_kg,Command");
                 Serial.print("SD Card Logging Enabled: ");
                 Serial.println(filename);
             } else {
